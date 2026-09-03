@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# CompAI CRM – Proxmox VE VM Installer (Community-Scripts-Stil)
-# Host-Script: läuft auf dem Proxmox-Host, erstellt eine Debian-12-VM.
-# Danach EINZEILER IN DER VM ausführen (wird am Ende ausgegeben):
-#   bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/CompAI-CRM/main/install/compai-crm.sh)"
+# CompAI CRM – Proxmox VE VM Installer (Community-Scripts-Stil, VOLLAUTOMATISCH)
+# Läuft auf dem Proxmox-Host. Fragt alles EINMAL ab, erstellt eine Debian-12-VM,
+# übergibt Zugang + OAuth-Werte per Cloud-Init und wartet, bis die Web-UI antwortet.
+# Danach ist KEIN Terminal in der VM mehr nötig: http://<VM-IP>:3000
 #
 # Warum VM statt LXC? trycompai/crm braucht Bun + Node>=22 + Turbo-Build +
 # Postgres + optional Docker/microsandbox für den Eve-Agent. Docker-in-LXC
@@ -14,10 +14,13 @@ var_ram="8192"     # MiB, Minimum 6144 – 8192 empfohlen
 var_disk="32"      # GiB, Minimum 24 (Build-Cache + Bun + Postgres)
 var_bridge="vmbr0"
 var_storage="local-lvm"
-var_imgstore="local"
+var_snippet_store="local"
+var_wait_min="40"  # max. Wartezeit auf die Web-UI (Erstbuild dauert!)
 DEBIAN_IMG="debian-12-generic-amd64.qcow2"
 DEBIAN_URL="https://cloud.debian.org/images/cloud/bookworm/latest/${DEBIAN_IMG}"
 DEFAULT_VMID="260"
+DEFAULT_CIUSER="crmadmin"
+GUEST_SCRIPT_URL="https://raw.githubusercontent.com/HatchetMan111/CompAI-CRM/main/install/compai-crm.sh"
 
 YW='\033[33m'; GN='\033[1;32m'; RD='\033[1;31m'; BL='\033[36m'; CL='\033[m'
 CM="${GN}✓${CL}"; CR="${RD}✗${CL}"
@@ -32,7 +35,7 @@ header_info() {
   ┌──────────────────────────────────────────────────────┐
   │      C O M P A I   C R M                             │
   │      Agentic-first Open-Source CRM                   │
-  │      Proxmox VE · VM Installer                       │
+  │      Proxmox VE · VM Installer (automatisch)         │
   └──────────────────────────────────────────────────────┘
    https://github.com/trycompai/crm
 
@@ -45,6 +48,8 @@ msg_error(){ echo -e "${CR} ${RD}${1}${CL}"; }
 
 error_handler() {
   local ec=$? line=${1:-?} cmd=${BASH_COMMAND:-?}
+  # Secrets nie ins Log: Passwörter/Secrets maskieren
+  cmd=$(printf '%s' "$cmd" | sed -E 's/(--cipassword )[^ ]+/\1***/g; s/((SECRET|AIKEY|_SECRET)=)[^ ;]+/\1***/g')
   echo -e "\n${CR} ${RD}FEHLER in Zeile ${line} (Exit ${ec}) beim Befehl: ${cmd}${CL}" >&2
   echo -e "${YW}--- Stacktrace (neueste zuerst) ---${CL}" >&2
   local i=0
@@ -60,13 +65,33 @@ command -v qm >/dev/null 2>&1 || die "Dieses Script muss auf einem Proxmox VE Ho
 command -v pvesm >/dev/null 2>&1 || die "pvesm fehlt – kein vollständiger PVE-Host?"
 
 header_info
-echo -e "\n${YW}Erstellt eine Debian-12-VM für CompAI CRM.${CL}"
+echo -e "\n${YW}Erstellt eine Debian-12-VM für CompAI CRM – vollautomatisch bis zur Web-UI.${CL}"
 echo -e "  ${BL}CPU:  ${GN}${var_cpu}${CL}   ${BL}RAM: ${GN}${var_ram} MiB${CL}   ${BL}Disk: ${GN}${var_disk} GiB${CL}"
-echo -e "  ${BL}Ports (in der VM): App ${GN}3000${CL}, API ${GN}3001${CL}, Agent ${GN}2000${CL}\n"
+echo -e "  ${BL}Web-UI: ${GN}http://<VM-IP>:3000${CL}  (API :3001, Agent :2000)\n"
 
+# ── Eingaben (einmalig, alles andere läuft von selbst) ───────────────
 read -rp "VM-ID [${DEFAULT_VMID}]: " VMID
 VMID="${VMID:-$DEFAULT_VMID}"
 [[ "$VMID" =~ ^[0-9]+$ ]] && [[ "$VMID" -ge 100 ]] || die "Ungültige VM-ID: '$VMID' (>=100)."
+
+read -rp "Linux-User in der VM [${DEFAULT_CIUSER}]: " CIUSER
+CIUSER="${CIUSER:-$DEFAULT_CIUSER}"
+echo -ne "${YW}Passwort für ${CIUSER} (Eingabe versteckt, PFLICHT): ${CL}"
+read -rs CIPASS; echo ""
+[[ -n "$CIPASS" ]] || die "Leeres Passwort – abgebrochen."
+
+echo -e "\n${YW}Login braucht ALLOWED_SIGN_IN + Google- ODER Microsoft-OAuth.${CL}"
+echo -e "${YW}Google Redirect-URI (später beim Provider eintragen): http://<VM-IP>:3001/api/auth/callback/google${CL}"
+read -rp "ALLOWED_SIGN_IN (z.B. acme.com oder du@gmail.com): " ALLOW
+if [[ -z "${ALLOW:-}" ]]; then
+  echo -e "${RD}WARNUNG: leer = NIEMAND kann sich einloggen, bis du manuell ein IdP unter Settings → SSO einrichtest.${CL}"
+fi
+read -rp "GOOGLE_CLIENT_ID (leer = ohne Google): " GID
+GIS=""; if [[ -n "${GID:-}" ]]; then echo -ne "${YW}GOOGLE_CLIENT_SECRET (versteckt): ${CL}"; read -rs GIS; echo ""; fi
+read -rp "MICROSOFT_CLIENT_ID (leer = ohne Microsoft): " MID
+MIS=""; if [[ -n "${MID:-}" ]]; then echo -ne "${YW}MICROSOFT_CLIENT_SECRET (versteckt): ${CL}"; read -rs MIS; echo ""; fi
+echo -ne "${YW}AI_GATEWAY_API_KEY für den Agent (leer = Agent ohne Modell, versteckt): ${CL}"
+read -rs AIKEY; echo ""
 
 if qm status "$VMID" >/dev/null 2>&1; then
   echo -ne "${YW}VM ${VMID} existiert. Löschen und neu erstellen? (j/n) ${CL}"
@@ -79,6 +104,51 @@ if qm status "$VMID" >/dev/null 2>&1; then
   msg_ok "Gelöscht"
 fi
 
+# ── Cloud-Init Snippets auf 'local' sicherstellen ────────────────────
+msg_info "Prüfe Snippets-Support auf Storage '${var_snippet_store}'"
+if ! grep -A5 "^dir: ${var_snippet_store}$" /etc/pve/storage.cfg 2>/dev/null | grep -q snippets; then
+  cp -a /etc/pve/storage.cfg "/root/storage.cfg.bak.$(date +%s)"
+  CUR=$(awk "/^dir: ${var_snippet_store}\$/{f=1} f&&/content/{print \$2; exit}" /etc/pve/storage.cfg)
+  pvesm set "$var_snippet_store" --content "${CUR},snippets" >/dev/null \
+    || die "Snippets lassen sich nicht aktivieren – manuell: pvesm set ${var_snippet_store} --content <alt>,snippets"
+fi
+SNIPPET_DIR="/var/lib/vz/snippets"
+mkdir -p "$SNIPPET_DIR"
+msg_ok "Snippets bereit"
+
+# ── Cloud-Init User-Data mit Seed schreiben ──────────────────────────
+# Single-Quote-Escaping für bash UND YAML-literal-Block: ' -> '\''
+qesc() { printf '%s' "$1" | sed "s/'/'\\\\''/g"; }
+SNIPPET="compai-crm-${VMID}-user.yaml"
+{
+  echo "#cloud-config"
+  echo "manage_etc_hosts: true"
+  echo "package_update: true"
+  echo "packages:"
+  echo "  - qemu-guest-agent"
+  echo "  - curl"
+  echo "  - ca-certificates"
+  echo "write_files:"
+  echo "  - path: /root/crm-seed/install.env"
+  echo "    owner: root:root"
+  echo "    permissions: '0600'"
+  echo "    content: |"
+  echo "      CRM_ALLOWED_SIGN_IN='$(qesc "${ALLOW:-}")'"
+  echo "      CRM_GOOGLE_CLIENT_ID='$(qesc "${GID:-}")'"
+  echo "      CRM_GOOGLE_CLIENT_SECRET='$(qesc "${GIS:-}")'"
+  echo "      CRM_MICROSOFT_CLIENT_ID='$(qesc "${MID:-}")'"
+  echo "      CRM_MICROSOFT_CLIENT_SECRET='$(qesc "${MIS:-}")'"
+  echo "      CRM_AI_GATEWAY_API_KEY='$(qesc "${AIKEY:-}")'"
+  echo "runcmd:"
+  echo "  - [systemctl, enable, --now, qemu-guest-agent]"
+  echo "  - [bash, -c, \"wget -qO /usr/local/sbin/compai-crm.sh ${GUEST_SCRIPT_URL} && chmod +x /usr/local/sbin/compai-crm.sh && CRM_NONINTERACTIVE=1 bash /usr/local/sbin/compai-crm.sh\"]"
+} > "${SNIPPET_DIR}/${SNIPPET}"
+chmod 600 "${SNIPPET_DIR}/${SNIPPET}"
+# Secrets aus Shell-Variablen löschen
+GIS=""; MIS=""; AIKEY=""; CIPASS_KEEP="$CIPASS"
+msg_ok "Cloud-Init-Seed geschrieben"
+
+# ── Image + VM ───────────────────────────────────────────────────────
 msg_info "Prüfe Debian-Cloud-Image"
 IMG_PATH="/var/lib/vz/template/iso/${DEBIAN_IMG}"
 if [[ ! -f "$IMG_PATH" ]]; then
@@ -105,17 +175,51 @@ qm create "$VMID" \
 qm importdisk "$VMID" "$IMG_PATH" "$var_storage" >/dev/null
 qm set "$VMID" --scsi0 "${var_storage}:vm-${VMID}-disk-0" >/dev/null
 qm resize "$VMID" scsi0 "${var_disk}G" >/dev/null 2>&1 || true
+qm set "$VMID" --ide2 "${var_storage}:cloudinit" >/dev/null
+qm set "$VMID" --ipconfig0 ip=dhcp --ciuser "$CIUSER" --cipassword "$CIPASS_KEEP" >/dev/null
+CIPASS_KEEP=""  # RAM-only, nie auf Platte ausserhalb der VM-Config
+qm set "$VMID" --cicustom "user=${var_snippet_store}:snippets/${SNIPPET}" >/dev/null
 qm set "$VMID" --boot order=scsi0 --serial0 socket --vga serial0 >/dev/null
-msg_ok "VM erstellt"
+msg_ok "VM erstellt (Cloud-Init aktiv)"
 
 msg_info "Starte VM"
 qm start "$VMID" >/dev/null
-msg_ok "VM gestartet"
+msg_ok "VM gestartet – Erstinstallation läuft jetzt selbstständig (ca. 10–25 Min)"
+
+# ── Warten: erst Guest-Agent + IP, dann Web-UI ───────────────────────
+msg_info "Warte auf Guest-Agent und DHCP-IP (max. 10 Min)"
+VM_IP=""
+for _ in $(seq 1 60); do
+  VM_IP=$(qm guest cmd "$VMID" network-get-interfaces 2>/dev/null \
+    | grep -oE '"ip-address":"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"' | cut -d'"' -f4 \
+    | grep -vE '^(127\.|169\.254\.)' | head -n1 || true)
+  [[ -n "$VM_IP" ]] && break
+  sleep 10
+done
+[[ -n "$VM_IP" ]] || die "Keine VM-IP via Guest-Agent – prüfe DHCP. Fortsetzen manuell: qm terminal ${VMID}, Log: /var/log/compai-crm-install.log"
+msg_ok "VM-IP: ${VM_IP}"
+
+msg_info "Warte auf Web-UI http://${VM_IP}:3000 (max. ${var_wait_min} Min)"
+END=$(( $(date +%s) + var_wait_min * 60 ))
+while [[ $(date +%s) -lt $END ]]; do
+  CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://${VM_IP}:3000/" 2>/dev/null || echo "000")
+  if [[ "$CODE" =~ ^(200|301|302|303|307|308)$ ]]; then
+    echo ""
+    echo -e "  ${CM} ${GN}FERTIG – Web-UI ist erreichbar, kein Terminal mehr nötig!${CL}"
+    echo -e "  ${CM} CRM:  ${YW}http://${VM_IP}:3000${CL}"
+    echo -e "  ${CM} API:  ${YW}http://${VM_IP}:3001${CL}"
+    echo -e "  ${CM} Login: ${YW}OAuth-Button (Google/Microsoft) – nur Adressen aus '${ALLOW:-<ALLOWED_SIGN_IN fehlt!>}' kommen rein${CL}"
+    echo -e "  ${CM} SSH (falls doch nötig): ${YW}ssh ${CIUSER}@${VM_IP}${CL}"
+    echo ""
+    exit 0
+  fi
+  echo -n "."
+  sleep 15
+done
 
 echo ""
-echo -e "  ${CM} ${GN}VM ${VMID} läuft (onboot=1).${CL}"
-echo -e "  ${CM} Debian-12-Setup fertigstellen, dann ${YW}IN DER VM${CL} ausführen:"
-echo -e "  ${YW}bash -c \"\$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/CompAI-CRM/main/install/compai-crm.sh)\"${CL}"
-echo -e "  ${CM} Web-UI danach: ${YW}http://<VM-IP>:3000${CL}  API: ${YW}http://<VM-IP>:3001${CL}"
-echo -e "  ${CM} VM-Shell: ${YW}qm terminal ${VMID}${CL}  oder via SSH"
-echo ""
+msg_error "Timeout nach ${var_wait_min} Min – Installation läuft in der VM ggf. weiter."
+echo -e "  ${YW}Status prüfen:${CL} qm terminal ${VMID}  →  tail -f /var/log/compai-crm-install.log"
+echo -e "  ${YW}Fertig-Datei:${CL}     cat /var/log/compai-crm-install.done"
+echo -e "  ${YW}Fallback manuell:${CL} bash -c \"\$(wget -qLO - ${GUEST_SCRIPT_URL})\""
+exit 1

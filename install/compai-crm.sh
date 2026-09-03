@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # CompAI CRM – Guest-Installer für Debian 12 VM (idempotent)
-# Einzeiler IN der VM:
+# Manuell IN der VM:
 #   bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/CompAI-CRM/main/install/compai-crm.sh)"
+# Oder UNBEAUFSICHTIGT (vom Host-Script per Cloud-Init gesetzt):
+#   CRM_NONINTERACTIVE=1 + Werte aus /root/crm-seed/install.env
+#   (CRM_ALLOWED_SIGN_IN, CRM_GOOGLE_CLIENT_ID/SECRET,
+#    CRM_MICROSOFT_CLIENT_ID/SECRET, CRM_AI_GATEWAY_API_KEY)
 # Installiert: Postgres 15 + Bun 1.3.12 + Node 22 + trycompai/crm (Branch release)
 # Dienste: compai-crm-api(:3001), compai-crm-app(:3000), compai-crm-agent(:2000)
 # Debug: DEBUG=1 bash -x install/compai-crm.sh  (volles xtrace)
+# Unattended-Log: /var/log/compai-crm-install.log, Fertig: /var/log/compai-crm-install.done
 
 APP="compai-crm"
 APP_DIR="/opt/compai-crm"
@@ -37,15 +42,30 @@ error_handler() {
 }
 trap 'error_handler $LINENO' ERR
 
+# ── Cloud-Init-Seed (vom Host-Script) + Noninteractive-Modus ─────────
+SEED_FILE="/root/crm-seed/install.env"
+if [[ -f "$SEED_FILE" ]]; then
+  # shellcheck disable=SC1090
+  set -a; source "$SEED_FILE"; set +a
+fi
+NONINTERACTIVE=0
+if [[ "${CRM_NONINTERACTIVE:-0}" == "1" ]]; then
+  NONINTERACTIVE=1
+  INSTALL_LOG="/var/log/compai-crm-install.log"
+  exec > >(tee -a "$INSTALL_LOG") 2>&1
+  echo "=== compai-crm unattended install $(date -Is) ==="
+fi
+
 [[ "$(id -u)" == "0" ]] || { echo -e "${CR} Als root ausführen.${CL}" >&2; exit 1; }
 command -v apt-get >/dev/null || { echo "Nur Debian/Ubuntu." >&2; exit 1; }
 
 export DEBIAN_FRONTEND=noninteractive LC_ALL=C LANG=C
 
-msg_info "Installiere Systempakete (postgres, curl, git, openssl)"
+msg_info "Installiere Systempakete (postgres, curl, git, openssl, qemu-guest-agent)"
 apt-get update -qq
-apt-get install -y -qq curl git ca-certificates openssl postgresql postgresql-contrib unzip >/dev/null
+apt-get install -y -qq curl git ca-certificates openssl postgresql postgresql-contrib unzip qemu-guest-agent >/dev/null
 systemctl enable --now postgresql >/dev/null
+systemctl enable --now qemu-guest-agent >/dev/null 2>&1 || true
 msg_ok "Postgres läuft"
 
 if ! command -v bun >/dev/null 2>&1; then
@@ -77,19 +97,42 @@ else
 fi
 msg_ok "Code bereit"
 
-msg_info "Erstelle / ergänze .env (idempotent, Secrets bleiben)"
+msg_info "Erstelle / ergänze .env (idempotent, manuelle Werte bleiben)"
 ENV_FILE="${APP_DIR}/.env"
 [[ -f "$ENV_FILE" ]] || cp "${APP_DIR}/.env.example" "$ENV_FILE"
 grep -q '^BETTER_AUTH_SECRET=.*[A-Za-z0-9]' "$ENV_FILE" \
   || sed -i "s|^BETTER_AUTH_SECRET=.*|BETTER_AUTH_SECRET=\"$(openssl rand -base64 32)\"|" "$ENV_FILE"
 grep -q '^DATABASE_URL=' "$ENV_FILE" \
   || echo 'DATABASE_URL="postgresql://crm:crm@localhost:5432/crm?schema=public"' >> "$ENV_FILE"
-if ! grep -q '^ALLOWED_SIGN_IN=.*[A-Za-z0-9@.]' "$ENV_FILE"; then
+# Setzt KEY="val" nur wenn der aktuelle Wert leer ist (Re-Runs ändern nichts).
+ensure_env() {
+  local key=$1 val=$2 cur esc
+  [[ -n "$val" ]] || return 0
+  cur=$(grep "^${key}=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '"' || true)
+  if [[ -z "$cur" ]]; then
+    esc=$(printf '%s' "$val" | sed -e 's/[\\/&|]/\\&/g')
+    if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
+      sed -i "s|^${key}=.*|${key}=\"${esc}\"|" "$ENV_FILE"
+    else
+      printf '%s="%s"\n' "$key" "$val" >> "$ENV_FILE"
+    fi
+  fi
+}
+ALLOW="${CRM_ALLOWED_SIGN_IN:-}"
+if [[ -z "$ALLOW" && "$NONINTERACTIVE" == "0" && -t 0 ]]; then
   echo ""
   echo -e "${YW}PFLICHT: Ohne ALLOWED_SIGN_IN + Google/Microsoft-OAuth gibt es KEINEN Login.${CL}"
   echo -e "${YW}README: Google Redirect-URI = http://<VM-IP>:3001/api/auth/callback/google${CL}"
   read -rp "ALLOWED_SIGN_IN (z.B. acme.com oder du@gmail.com, leer=später manuell): " ALLOW
-  [[ -n "${ALLOW:-}" ]] && sed -i "s|^ALLOWED_SIGN_IN=.*|ALLOWED_SIGN_IN=\"${ALLOW}\"|" "$ENV_FILE" || true
+fi
+ensure_env "ALLOWED_SIGN_IN" "${ALLOW:-}"
+ensure_env "GOOGLE_CLIENT_ID" "${CRM_GOOGLE_CLIENT_ID:-}"
+ensure_env "GOOGLE_CLIENT_SECRET" "${CRM_GOOGLE_CLIENT_SECRET:-}"
+ensure_env "MICROSOFT_CLIENT_ID" "${CRM_MICROSOFT_CLIENT_ID:-}"
+ensure_env "MICROSOFT_CLIENT_SECRET" "${CRM_MICROSOFT_CLIENT_SECRET:-}"
+ensure_env "AI_GATEWAY_API_KEY" "${CRM_AI_GATEWAY_API_KEY:-}"
+if ! grep -q '^ALLOWED_SIGN_IN=.*[A-Za-z0-9@.]' "$ENV_FILE"; then
+  echo -e "${YW}WARNUNG: ALLOWED_SIGN_IN leer – niemand kann sich einloggen, bis ein IdP unter Settings → SSO eingerichtet ist.${CL}" >&2
 fi
 # shellcheck disable=SC1091
 set -a; source "$ENV_FILE"; set +a
@@ -175,6 +218,8 @@ curl -fsS "http://localhost:${APP_PORT}/" >/dev/null \
 msg_ok "Verifikation ok"
 
 VM_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+APP_URL="http://${VM_IP:-<VM-IP>}:${APP_PORT}"
+echo "$APP_URL" > /var/log/compai-crm-install.done
 echo ""
 echo -e "  ${CM} ${GN}CompAI CRM installiert + reboot-sicher (systemd, onboot=1 an der VM setzen).${CL}"
 echo -e "  ${CM} App:   ${YW}http://${VM_IP:-<VM-IP>}:${APP_PORT}${CL}"
