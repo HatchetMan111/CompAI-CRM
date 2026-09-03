@@ -186,22 +186,50 @@ msg_info "Starte VM"
 qm start "$VMID" >/dev/null
 msg_ok "VM gestartet – Erstinstallation läuft jetzt selbstständig (ca. 10–25 Min)"
 
-# ── Warten: erst Guest-Agent + IP, dann Web-UI ───────────────────────
-msg_info "Warte auf Guest-Agent und DHCP-IP (max. 10 Min)"
-VM_IP=""
-for _ in $(seq 1 60); do
-  VM_IP=$(qm guest cmd "$VMID" network-get-interfaces 2>/dev/null \
+# ── Warten: erst IP (Agent ODER ARP), dann Web-UI ───────────────────
+# Robust auch ohne Guest-Agent: Fallback über MAC + ARP-Tabelle der Bridge.
+get_vm_ip() {
+  local ip mac bcast
+  # 1) QEMU Guest-Agent
+  ip=$(qm guest cmd "$VMID" network-get-interfaces 2>/dev/null \
     | grep -oE '"ip-address":"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"' | cut -d'"' -f4 \
     | grep -vE '^(127\.|169\.254\.)' | head -n1 || true)
-  [[ -n "$VM_IP" ]] && break
+  if [[ -n "$ip" ]]; then echo "$ip"; return 0; fi
+  # 2) ARP-Tabelle: MAC aus der VM-Config, Broadcast-Ping füllt die Tabelle
+  mac=$(qm config "$VMID" 2>/dev/null | grep -oiE '(virtio|e1000|vmxnet3)=[A-Fa-f0-9:]{17}' | cut -d= -f2 | head -n1 || true)
+  if [[ -n "$mac" ]]; then
+    bcast=$(ip -4 addr show dev "$var_bridge" 2>/dev/null | grep -oE 'brd [0-9.]+' | awk '{print $2}' | head -n1 || true)
+    [[ -n "$bcast" ]] && ping -b -c2 -W2 "$bcast" >/dev/null 2>&1 || true
+    ip=$(ip neigh show dev "$var_bridge" 2>/dev/null | grep -i "$mac" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
+    if [[ -n "$ip" ]]; then echo "$ip"; return 0; fi
+  fi
+  return 1
+}
+
+msg_info "Warte auf VM-IP via Agent oder ARP (max. 10 Min)"
+VM_IP=""
+for i in $(seq 1 60); do
+  if VM_IP=$(get_vm_ip 2>/dev/null); then break; fi
+  VM_IP=""
+  (( i % 6 == 0 )) && echo -e "  ${YW}noch keine IP (Versuch ${i}/60) – VM bootet / DHCP läuft${CL}"
   sleep 10
 done
-[[ -n "$VM_IP" ]] || die "Keine VM-IP via Guest-Agent – prüfe DHCP. Fortsetzen manuell: qm terminal ${VMID}, Log: /var/log/compai-crm-install.log"
+[[ -n "$VM_IP" ]] || die "Keine VM-IP gefunden (weder Agent noch ARP nach 10 Min) – prüfe DHCP/Bridge. Fortsetzen manuell: qm terminal ${VMID}, Log in VM: /var/log/compai-crm-install.log"
 msg_ok "VM-IP: ${VM_IP}"
 
 msg_info "Warte auf Web-UI http://${VM_IP}:3000 (max. ${var_wait_min} Min)"
 END=$(( $(date +%s) + var_wait_min * 60 ))
+N=0
 while [[ $(date +%s) -lt $END ]]; do
+  N=$((N+1))
+  # DHCP-IP kann sich ändern -> alle ~2 Min neu auflösen
+  if (( N % 8 == 0 )); then
+    NEW_IP=$(get_vm_ip 2>/dev/null || true)
+    if [[ -n "$NEW_IP" && "$NEW_IP" != "$VM_IP" ]]; then
+      VM_IP="$NEW_IP"
+      echo -e "\n  ${YW}neue VM-IP: ${VM_IP}${CL}"
+    fi
+  fi
   CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://${VM_IP}:3000/" 2>/dev/null || echo "000")
   if [[ "$CODE" =~ ^(200|301|302|303|307|308)$ ]]; then
     echo ""
