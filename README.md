@@ -18,9 +18,9 @@ die Web-UI von selbst. Kein Terminal in der VM mehr nötig.**
 bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/CompAI-CRM/main/install/compai-crm-vm.sh)"
 ```
 
-Das Script fragt **einmalig** ab: VM-ID, Linux-User + Passwort für die VM,
-`ALLOWED_SIGN_IN`, optional Google-/Microsoft-OAuth-Clients und
-`AI_GATEWAY_API_KEY`. Danach läuft alles von selbst:
+Das Script fragt **einmalig** (alles mit Default, alles überspringbar per Enter):
+VM-ID, Linux-User + Passwort (leer = Zufallspasswort), `ALLOWED_SIGN_IN`,
+optional OAuth-Clients und `AI_GATEWAY_API_KEY`. Danach läuft alles von selbst:
 
 1. VM wird per Cloud-Init mit User, DHCP und Seed-Werten versorgt
 2. Die VM installiert Postgres, Bun, CRM-Build und 3 systemd-Dienste (~10–25 Min)
@@ -32,10 +32,12 @@ Bei Fehlern mit vollem Log:
 bash -x install/compai-crm-vm.sh   # Host-Script mit xtrace
 ```
 
-## Wichtig vorab: OAuth-Pflicht
+## Wichtig vorab: OAuth-Pflicht kommt von der App
 
-Ohne `ALLOWED_SIGN_IN` + **Google- oder Microsoft-OAuth-Client** (oder eigenes
-IdP unter Settings → SSO) gibt es **keinen Login**. Redirect-URI beim Provider
+Das Upstream-CRM kennt **kein Benutzer/Passwort-Login**, nur Google-,
+Microsoft-OAuth oder eigenes SSO. Ohne Keys zeigt die Web-UI nur die
+Login-Seite – deshalb lässt das Script alles leere zu und druckt am Ende die
+exakte Nachtrag-Anleitung (3 Befehle in der VM). Redirect-URI beim Provider
 eintragen (mit der echten VM-IP):
 
 - Google: `http://<VM-IP>:3001/api/auth/callback/google`

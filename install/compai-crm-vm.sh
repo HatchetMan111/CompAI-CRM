@@ -76,22 +76,27 @@ VMID="${VMID:-$DEFAULT_VMID}"
 
 read -rp "Linux-User in der VM [${DEFAULT_CIUSER}]: " CIUSER
 CIUSER="${CIUSER:-$DEFAULT_CIUSER}"
-echo -ne "${YW}Passwort für ${CIUSER} (Eingabe versteckt, PFLICHT): ${CL}"
+echo -ne "${YW}Passwort für ${CIUSER} (versteckt, LEER = Zufallspasswort): ${CL}"
 read -rs CIPASS; echo ""
-[[ -n "$CIPASS" ]] || die "Leeres Passwort – abgebrochen."
-
-echo -e "\n${YW}Login braucht ALLOWED_SIGN_IN + Google- ODER Microsoft-OAuth.${CL}"
-echo -e "${YW}Google Redirect-URI (später beim Provider eintragen): http://<VM-IP>:3001/api/auth/callback/google${CL}"
-read -rp "ALLOWED_SIGN_IN (z.B. acme.com oder du@gmail.com): " ALLOW
-if [[ -z "${ALLOW:-}" ]]; then
-  echo -e "${RD}WARNUNG: leer = NIEMAND kann sich einloggen, bis du manuell ein IdP unter Settings → SSO einrichtest.${CL}"
+GENPASS=""
+if [[ -z "${CIPASS:-}" ]]; then
+  CIPASS="crm-$(openssl rand -hex 8)"
+  GENPASS=1
 fi
-read -rp "GOOGLE_CLIENT_ID (leer = ohne Google): " GID
-GIS=""; if [[ -n "${GID:-}" ]]; then echo -ne "${YW}GOOGLE_CLIENT_SECRET (versteckt): ${CL}"; read -rs GIS; echo ""; fi
-read -rp "MICROSOFT_CLIENT_ID (leer = ohne Microsoft): " MID
-MIS=""; if [[ -n "${MID:-}" ]]; then echo -ne "${YW}MICROSOFT_CLIENT_SECRET (versteckt): ${CL}"; read -rs MIS; echo ""; fi
-echo -ne "${YW}AI_GATEWAY_API_KEY für den Agent (leer = Agent ohne Modell, versteckt): ${CL}"
-read -rs AIKEY; echo ""
+
+echo -e "\n${YW}Login & Keys: ALLES OPTIONAL – nur Enter drücken, das Script läuft trotzdem durch.${CL}"
+echo -e "  Ohne Keys zeigt die Web-UI nur die Login-Seite, bis du sie nachträgst (Anleitung kommt am Ende)."
+read -rp "ALLOWED_SIGN_IN – deine Login-E-Mail/Domain (leer = später): " ALLOW
+GID=""; GIS=""; MID=""; MIS=""; AIKEY=""
+read -rp "OAuth/Modell-Keys jetzt eintragen? [j/N]: " OAUTH_NOW
+if [[ "${OAUTH_NOW:-}" =~ ^[Jj]$ ]]; then
+  read -rp "  GOOGLE_CLIENT_ID (leer = ohne Google): " GID
+  if [[ -n "${GID:-}" ]]; then echo -ne "  ${YW}GOOGLE_CLIENT_SECRET (versteckt): ${CL}"; read -rs GIS; echo ""; fi
+  read -rp "  MICROSOFT_CLIENT_ID (leer = ohne Microsoft): " MID
+  if [[ -n "${MID:-}" ]]; then echo -ne "  ${YW}MICROSOFT_CLIENT_SECRET (versteckt): ${CL}"; read -rs MIS; echo ""; fi
+  echo -ne "  ${YW}AI_GATEWAY_API_KEY = Agent-Modell (versteckt, leer = ohne): ${CL}"
+  read -rs AIKEY; echo ""
+fi
 
 if qm status "$VMID" >/dev/null 2>&1; then
   echo -ne "${YW}VM ${VMID} existiert. Löschen und neu erstellen? (j/n) ${CL}"
@@ -101,6 +106,7 @@ if qm status "$VMID" >/dev/null 2>&1; then
   qm stop "$VMID" >/dev/null 2>&1 || true; sleep 3
   msg_info "Lösche VM ${VMID}"
   qm destroy "$VMID" --purge >/dev/null 2>&1 || true; sleep 2
+  rm -f /var/lib/vz/snippets/compai-crm-"${VMID}"-*.yaml 2>/dev/null || true
   msg_ok "Gelöscht"
 fi
 
@@ -116,12 +122,13 @@ SNIPPET_DIR="/var/lib/vz/snippets"
 mkdir -p "$SNIPPET_DIR"
 msg_ok "Snippets bereit"
 
-# ── Cloud-Init User-Data mit Seed schreiben ──────────────────────────
-# Single-Quote-Escaping für bash UND YAML-literal-Block: ' -> '\''
+# ── Cloud-Init Vendor-Data mit Seed schreiben ────────────────────────
+# WICHTIG: vendor= (nicht user=) – Vendor-Data wird mit der PVE-User-Config
+# (ciuser/cipassword/ipconfig) zusammengeführt; user= würde sie ERSETZEN.
 qesc() { printf '%s' "$1" | sed "s/'/'\\\\''/g"; }
-SNIPPET="compai-crm-${VMID}-user.yaml"
+SNIPPET="compai-crm-${VMID}-vendor.yaml"
 {
-  echo "#cloud-config"
+  echo "#cloud-config  # vendor-data: läuft zusätzlich zur PVE-User-Config"
   echo "manage_etc_hosts: true"
   echo "package_update: true"
   echo "packages:"
@@ -144,8 +151,9 @@ SNIPPET="compai-crm-${VMID}-user.yaml"
   echo "  - [bash, -c, \"wget -qO /usr/local/sbin/compai-crm.sh ${GUEST_SCRIPT_URL} && chmod +x /usr/local/sbin/compai-crm.sh && CRM_NONINTERACTIVE=1 bash /usr/local/sbin/compai-crm.sh\"]"
 } > "${SNIPPET_DIR}/${SNIPPET}"
 chmod 600 "${SNIPPET_DIR}/${SNIPPET}"
-# Secrets aus Shell-Variablen löschen
-GIS=""; MIS=""; AIKEY=""; CIPASS_KEEP="$CIPASS"
+# Secrets aus Shell-Variablen löschen (RAM-only ab hier)
+CIPASS_KEEP="$CIPASS"; CIPASS=""
+GIS=""; MIS=""; AIKEY=""
 msg_ok "Cloud-Init-Seed geschrieben"
 
 # ── Image + VM ───────────────────────────────────────────────────────
@@ -175,10 +183,16 @@ qm create "$VMID" \
 qm importdisk "$VMID" "$IMG_PATH" "$var_storage" >/dev/null
 qm set "$VMID" --scsi0 "${var_storage}:vm-${VMID}-disk-0" >/dev/null
 qm resize "$VMID" scsi0 "${var_disk}G" >/dev/null 2>&1 || true
-qm set "$VMID" --ide2 "${var_storage}:cloudinit" >/dev/null
+qm set "$VMID" --ide2 "${var_snippet_store}:cloudinit" >/dev/null 2>&1 \
+  || qm set "$VMID" --ide2 "${var_storage}:cloudinit" >/dev/null \
+  || die "Cloud-Init-Disk lässt sich nicht anlegen (Storage prüfen)."
 qm set "$VMID" --ipconfig0 ip=dhcp --ciuser "$CIUSER" --cipassword "$CIPASS_KEEP" >/dev/null
+if [[ -n "${GENPASS:-}" ]]; then
+  printf 'VM %s | User %s | Passwort %s\n' "$VMID" "$CIUSER" "$CIPASS_KEEP" > "/root/compai-crm-${VMID}.cred"
+  chmod 600 "/root/compai-crm-${VMID}.cred"
+fi
 CIPASS_KEEP=""  # RAM-only, nie auf Platte ausserhalb der VM-Config
-qm set "$VMID" --cicustom "user=${var_snippet_store}:snippets/${SNIPPET}" >/dev/null
+qm set "$VMID" --cicustom "vendor=${var_snippet_store}:snippets/${SNIPPET}" >/dev/null
 qm set "$VMID" --boot order=scsi0 --serial0 socket --vga serial0 >/dev/null
 msg_ok "VM erstellt (Cloud-Init aktiv)"
 
@@ -233,11 +247,25 @@ while [[ $(date +%s) -lt $END ]]; do
   CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://${VM_IP}:3000/" 2>/dev/null || echo "000")
   if [[ "$CODE" =~ ^(200|301|302|303|307|308)$ ]]; then
     echo ""
-    echo -e "  ${CM} ${GN}FERTIG – Web-UI ist erreichbar, kein Terminal mehr nötig!${CL}"
+    echo -e "  ${CM} ${GN}FERTIG – Web-UI ist erreichbar!${CL}"
     echo -e "  ${CM} CRM:  ${YW}http://${VM_IP}:3000${CL}"
     echo -e "  ${CM} API:  ${YW}http://${VM_IP}:3001${CL}"
-    echo -e "  ${CM} Login: ${YW}OAuth-Button (Google/Microsoft) – nur Adressen aus '${ALLOW:-<ALLOWED_SIGN_IN fehlt!>}' kommen rein${CL}"
-    echo -e "  ${CM} SSH (falls doch nötig): ${YW}ssh ${CIUSER}@${VM_IP}${CL}"
+    if [[ -n "${GENPASS:-}" ]]; then
+      echo -e "  ${CM} SSH:  ${YW}ssh ${CIUSER}@${VM_IP}${CL}  (Zufallspasswort, auch in ${YW}/root/compai-crm-${VMID}.cred${CL})"
+    else
+      echo -e "  ${CM} SSH (falls nötig): ${YW}ssh ${CIUSER}@${VM_IP}${CL}"
+    fi
+    if [[ -z "${ALLOW:-}" || ( -z "${GID:-}" && -z "${MID:-}" ) ]]; then
+      echo ""
+      echo -e "  ${YW}Noch kein Login möglich (Keys leer) – einmalig nachtragen:${CL}"
+      echo -e "    ${YW}1.${CL} Google/Microsoft-OAuth-Client anlegen (Upstream-README, 2 Min)"
+      echo -e "       Redirect-URI: ${YW}http://${VM_IP}:3001/api/auth/callback/google${CL}"
+      echo -e "    ${YW}2.${CL} qm terminal ${VMID}  (oder ssh ${CIUSER}@${VM_IP})"
+      echo -e "    ${YW}3.${CL} sudo nano /opt/compai-crm/.env   # ALLOWED_SIGN_IN + CLIENT_ID/SECRET setzen"
+      echo -e "    ${YW}4.${CL} sudo systemctl restart compai-crm-api compai-crm-app"
+    else
+      echo -e "  ${CM} Login: ${YW}OAuth-Button – nur '${ALLOW}' kommt rein${CL}"
+    fi
     echo ""
     exit 0
   fi
