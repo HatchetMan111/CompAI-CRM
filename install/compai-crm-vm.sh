@@ -264,6 +264,42 @@ if [[ -z "$VM_IP" ]] && qm guest cmd "$VMID" network-get-interfaces >/dev/null 2
     sleep 10
   done
 fi
+# Auto-Static-Fallback: DHCP liefert partout nichts -> freie IP suchen, setzen, rebooten
+if [[ -z "$VM_IP" ]]; then
+  echo -e "  ${YW}DHCP liefert keine IPv4 – versuche Auto-Static-IP${CL}"
+  BR_CIDR=$(ip -4 addr show dev "$var_bridge" 2>/dev/null | grep -oE 'inet [0-9./]+' | awk '{print $2}' | head -n1 || true)
+  GW=$(ip route show default dev "$var_bridge" 2>/dev/null | grep -oE 'via [0-9.]+' | awk '{print $2}' | head -n1 || true)
+  if [[ -n "$BR_CIDR" && -n "$GW" ]]; then
+    NET_BASE="${BR_CIDR%/*}"; NET_BASE="${NET_BASE%.*}"
+    PREFIX="${BR_CIDR#*/}"
+    CAND=""
+    for last in $(seq 250 -1 230); do
+      try="${NET_BASE}.${last}"
+      if [[ "$try" == "$GW" ]]; then continue; fi
+      if ! ping -c1 -W1 "$try" >/dev/null 2>&1; then
+        if ! ip neigh show dev "$var_bridge" 2>/dev/null | grep -qE "^${try}[[:space:]]+.*(REACHABLE|STALE|DELAY|PROBE|PERMANENT)"; then
+          CAND="$try"; break
+        fi
+      fi
+    done
+    if [[ -n "$CAND" ]]; then
+      msg_info "Setze statisch ${CAND}/${PREFIX} via ${GW}, reboote VM"
+      qm set "$VMID" --ipconfig0 "ip=${CAND}/${PREFIX},gw=${GW}" --nameserver "1.1.1.1" >/dev/null
+      qm reboot "$VMID" >/dev/null 2>&1 || { qm stop "$VMID" >/dev/null 2>&1 || true; sleep 3; qm start "$VMID" >/dev/null; }
+      msg_info "Warte auf Reboot + statische IP (max. 10 Min)"
+      for i in $(seq 1 60); do
+        if VM_IP=$(get_vm_ip 2>/dev/null); then break; fi
+        VM_IP=""
+        sleep 10
+      done
+      if [[ -n "$VM_IP" ]]; then msg_ok "VM-IP (statisch): ${VM_IP}"; fi
+    else
+      echo -e "  ${YW}keine freie IP im Bereich ${NET_BASE}.230-250 gefunden${CL}"
+    fi
+  else
+    echo -e "  ${YW}Auto-Static unmöglich (Bridge ${var_bridge} hat keine eigene IPv4 oder kein Default-Gateway)${CL}"
+  fi
+fi
 if [[ -z "$VM_IP" ]]; then
   echo -e "${YW}--- Netzwerk-Diagnose ---${CL}" >&2
   qm status "$VMID" 2>&1 >&2 || true
@@ -272,7 +308,7 @@ if [[ -z "$VM_IP" ]]; then
   echo "ARP-Tabelle ${var_bridge}:" >&2; ip neigh show dev "$var_bridge" 2>&1 >&2 || true
   echo "Agent-Antwort:" >&2; qm guest cmd "$VMID" network-get-interfaces 2>&1 | head -c 1500 >&2 || true
   echo "" >&2
-  die "Keine VM-IP nach 10 Min. Häufigste Ursachen: kein DHCP im Netz (neu starten + statische IP wählen, z.B. 192.168.178.153/24), VM hängt im Boot (qm terminal ${VMID} prüfen). Die VM installiert ggf. weiter – Log in VM: /var/log/compai-crm-install.log"
+  die "Keine VM-IP nach 10 Min (auch nicht per Auto-Static). Ursachen: kein DHCP + kein freier Bereich .230-250, oder VM hängt im Boot (qm terminal ${VMID}). Tipp: neu starten + statische IP manuell wählen. Die VM installiert ggf. weiter – Log in VM: /var/log/compai-crm-install.log"
 fi
 msg_ok "VM-IP: ${VM_IP}"
 
