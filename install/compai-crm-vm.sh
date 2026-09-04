@@ -219,9 +219,10 @@ msg_ok "VM gestartet – Erstinstallation läuft jetzt selbstständig (ca. 10–
 # Robust auch ohne Guest-Agent: Fallback über MAC + ARP-Tabelle der Bridge.
 get_vm_ip() {
   local ip mac bcast
-  # 1) QEMU Guest-Agent
+  # 1) QEMU Guest-Agent (Proxmox-JSON hat Leerzeichen um ':', daher tolerant matchen)
   ip=$(qm guest cmd "$VMID" network-get-interfaces 2>/dev/null \
-    | grep -oE '"ip-address":"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"' | cut -d'"' -f4 \
+    | grep -oE '"ip-address"[[:space:]]*:[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"' \
+    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
     | grep -vE '^(127\.|169\.254\.)' | head -n1 || true)
   if [[ -n "$ip" ]]; then echo "$ip"; return 0; fi
   # 2) ARP-Tabelle: MAC aus der VM-Config, Broadcast-Ping füllt die Tabelle
