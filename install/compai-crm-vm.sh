@@ -84,6 +84,17 @@ if [[ -z "${CIPASS:-}" ]]; then
   GENPASS=1
 fi
 
+echo -e "\n${YW}Netzwerk in der VM (falls dein Netz kein DHCP hat: statisch wählen):${CL}"
+read -rp "Statische IP statt DHCP? [j/N]: " STATIC_NOW
+IP_STATIC=""; IP_GW=""; IP_DNS="1.1.1.1"
+if [[ "${STATIC_NOW:-}" =~ ^[Jj]$ ]]; then
+  read -rp "  IP mit Netzmaske (z.B. 192.168.178.50/24): " IP_STATIC
+  read -rp "  Gateway (z.B. 192.168.178.1): " IP_GW
+  read -rp "  DNS [1.1.1.1]: " _DNS; IP_DNS="${_DNS:-1.1.1.1}"
+  [[ "$IP_STATIC" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]] || die "IP-Format ungültig (erwartet z.B. 192.168.178.50/24)."
+  [[ -n "$IP_GW" ]] || die "Gateway fehlt."
+fi
+
 echo -e "\n${YW}Login & Keys: ALLES OPTIONAL – nur Enter drücken, das Script läuft trotzdem durch.${CL}"
 echo -e "  Ohne Keys zeigt die Web-UI nur die Login-Seite, bis du sie nachträgst (Anleitung kommt am Ende)."
 read -rp "ALLOWED_SIGN_IN – deine Login-E-Mail/Domain (leer = später): " ALLOW
@@ -186,7 +197,11 @@ qm resize "$VMID" scsi0 "${var_disk}G" >/dev/null 2>&1 || true
 qm set "$VMID" --ide2 "${var_snippet_store}:cloudinit" >/dev/null 2>&1 \
   || qm set "$VMID" --ide2 "${var_storage}:cloudinit" >/dev/null \
   || die "Cloud-Init-Disk lässt sich nicht anlegen (Storage prüfen)."
-qm set "$VMID" --ipconfig0 ip=dhcp --ciuser "$CIUSER" --cipassword "$CIPASS_KEEP" >/dev/null
+if [[ -n "${IP_STATIC:-}" ]]; then
+  qm set "$VMID" --ipconfig0 "ip=${IP_STATIC},gw=${IP_GW}" --nameserver "${IP_DNS}" --ciuser "$CIUSER" --cipassword "$CIPASS_KEEP" >/dev/null
+else
+  qm set "$VMID" --ipconfig0 ip=dhcp --ciuser "$CIUSER" --cipassword "$CIPASS_KEEP" >/dev/null
+fi
 if [[ -n "${GENPASS:-}" ]]; then
   printf 'VM %s | User %s | Passwort %s\n' "$VMID" "$CIUSER" "$CIPASS_KEEP" > "/root/compai-crm-${VMID}.cred"
   chmod 600 "/root/compai-crm-${VMID}.cred"
@@ -225,10 +240,26 @@ VM_IP=""
 for i in $(seq 1 60); do
   if VM_IP=$(get_vm_ip 2>/dev/null); then break; fi
   VM_IP=""
-  (( i % 6 == 0 )) && echo -e "  ${YW}noch keine IP (Versuch ${i}/60) – VM bootet / DHCP läuft${CL}"
+  if (( i % 6 == 0 )); then
+    AGENT="nein"
+    if qm guest cmd "$VMID" network-get-interfaces >/dev/null 2>&1; then AGENT="läuft, meldet aber noch kein IPv4"; fi
+    TAP="down/fehlt"
+    if ip link show "tap${VMID}i0" 2>/dev/null | grep -qE 'state (UP|UNKNOWN)'; then TAP="up"; fi
+    NBR=$(ip neigh show dev "$var_bridge" 2>/dev/null | wc -l)
+    echo -e "  ${YW}noch keine IP (${i}/60): Agent=${AGENT}, tap=${TAP}, ARP-Einträge=${NBR}${CL}"
+  fi
   sleep 10
 done
-[[ -n "$VM_IP" ]] || die "Keine VM-IP gefunden (weder Agent noch ARP nach 10 Min) – prüfe DHCP/Bridge. Fortsetzen manuell: qm terminal ${VMID}, Log in VM: /var/log/compai-crm-install.log"
+if [[ -z "$VM_IP" ]]; then
+  echo -e "${YW}--- Netzwerk-Diagnose ---${CL}" >&2
+  qm status "$VMID" 2>&1 >&2 || true
+  qm config "$VMID" 2>&1 | grep -Ei '^(net0|ipconfig|agent|boot|cicustom|ide2|scsi0|nameserver)' >&2 || true
+  echo "tap-Interface:" >&2; ip link show "tap${VMID}i0" 2>&1 >&2 || true
+  echo "ARP-Tabelle ${var_bridge}:" >&2; ip neigh show dev "$var_bridge" 2>&1 >&2 || true
+  echo "Agent-Antwort:" >&2; qm guest cmd "$VMID" network-get-interfaces 2>&1 | head -c 1500 >&2 || true
+  echo "" >&2
+  die "Keine VM-IP nach 10 Min. Häufigste Ursachen: kein DHCP im Netz (neu starten + statische IP wählen), VM hängt im Boot (qm terminal ${VMID} prüfen). Die VM installiert ggf. weiter – Log in VM: /var/log/compai-crm-install.log"
+fi
 msg_ok "VM-IP: ${VM_IP}"
 
 msg_info "Warte auf Web-UI http://${VM_IP}:3000 (max. ${var_wait_min} Min)"

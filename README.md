@@ -22,7 +22,7 @@ Das Script fragt **einmalig** (alles mit Default, alles überspringbar per Enter
 VM-ID, Linux-User + Passwort (leer = Zufallspasswort), `ALLOWED_SIGN_IN`,
 optional OAuth-Clients und `AI_GATEWAY_API_KEY`. Danach läuft alles von selbst:
 
-1. VM wird per Cloud-Init mit User, DHCP und Seed-Werten versorgt
+1. VM wird per Cloud-Init mit User, Netzwerk (DHCP oder statisch wählbar) und Seed-Werten versorgt
 2. Die VM installiert Postgres, Bun, CRM-Build und 3 systemd-Dienste (~10–25 Min)
 3. Der Host wartet und meldet am Ende: `http://<VM-IP>:3000` ✅
 
