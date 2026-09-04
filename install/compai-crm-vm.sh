@@ -251,6 +251,19 @@ for i in $(seq 1 60); do
   fi
   sleep 10
 done
+# Selbstheilung: Agent lebt, aber kein IPv4 (DHCPv4 hängt) -> DHCP im Gast anstoßen
+if [[ -z "$VM_IP" ]] && qm guest cmd "$VMID" network-get-interfaces >/dev/null 2>&1; then
+  echo -e "  ${YW}Agent lebt ohne IPv4 – stoße DHCP im Gast an (dhclient eth0)${CL}"
+  qm guest exec "$VMID" -- sh -c 'dhclient -4 -v eth0 2>&1 | tail -3 || dhclient eth0' >/dev/null 2>&1 || true
+  for i in $(seq 1 12); do
+    if VM_IP=$(get_vm_ip 2>/dev/null); then
+      echo -e "  ${CM} ${GN}DHCP-Anstoß erfolgreich: ${VM_IP}${CL}"
+      break
+    fi
+    VM_IP=""
+    sleep 10
+  done
+fi
 if [[ -z "$VM_IP" ]]; then
   echo -e "${YW}--- Netzwerk-Diagnose ---${CL}" >&2
   qm status "$VMID" 2>&1 >&2 || true
@@ -259,7 +272,7 @@ if [[ -z "$VM_IP" ]]; then
   echo "ARP-Tabelle ${var_bridge}:" >&2; ip neigh show dev "$var_bridge" 2>&1 >&2 || true
   echo "Agent-Antwort:" >&2; qm guest cmd "$VMID" network-get-interfaces 2>&1 | head -c 1500 >&2 || true
   echo "" >&2
-  die "Keine VM-IP nach 10 Min. Häufigste Ursachen: kein DHCP im Netz (neu starten + statische IP wählen), VM hängt im Boot (qm terminal ${VMID} prüfen). Die VM installiert ggf. weiter – Log in VM: /var/log/compai-crm-install.log"
+  die "Keine VM-IP nach 10 Min. Häufigste Ursachen: kein DHCP im Netz (neu starten + statische IP wählen, z.B. 192.168.178.153/24), VM hängt im Boot (qm terminal ${VMID} prüfen). Die VM installiert ggf. weiter – Log in VM: /var/log/compai-crm-install.log"
 fi
 msg_ok "VM-IP: ${VM_IP}"
 
