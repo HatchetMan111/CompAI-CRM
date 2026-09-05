@@ -23,6 +23,11 @@ CM="${GN}✓${CL}"; CR="${RD}✗${CL}"
 set -Eeuo pipefail
 [[ "${DEBUG:-0}" == "1" ]] && set -x
 
+# Fortschritt für visuelle Rückmeldung
+STEPS=8; STEP=0; START_TS=$SECONDS
+step() { STEP=$((STEP+1)); echo ""; msg_info "[${STEP}/${STEPS}] ${1}"; }
+elapsed() { local s=$((SECONDS-START_TS)); printf '%02d:%02d Min.' $((s/60)) $((s%60)); }
+
 msg_info() { echo -e "${YW}● ${CL}${BL}${1}...${CL}"; }
 msg_ok()   { echo -e "${CM} ${GN}${1}${CL}"; }
 
@@ -61,13 +66,14 @@ command -v apt-get >/dev/null || { echo "Nur Debian/Ubuntu." >&2; exit 1; }
 
 export DEBIAN_FRONTEND=noninteractive LC_ALL=C LANG=C
 
-msg_info "Installiere Systempakete (postgres, curl, git, openssl, qemu-guest-agent)"
+step "Systempakete (postgres, curl, git, openssl, qemu-guest-agent)"
 apt-get update -qq
 apt-get install -y -qq curl git ca-certificates openssl postgresql postgresql-contrib unzip qemu-guest-agent >/dev/null
 systemctl enable --now postgresql >/dev/null
 systemctl enable --now qemu-guest-agent >/dev/null 2>&1 || true
 msg_ok "Postgres läuft"
 
+step "Laufzeit Bun ${BUN_VERSION} + Node.js 22"
 if ! command -v bun >/dev/null 2>&1; then
   msg_info "Installiere Bun ${BUN_VERSION}"
   curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s -- "bun-v${BUN_VERSION}" >/dev/null
@@ -78,16 +84,16 @@ if ! command -v node >/dev/null 2>&1 || [[ "$(node -v | cut -d. -f1 | tr -dc 0-9
   curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null
   apt-get install -y -qq nodejs >/dev/null
 fi
-msg_ok "Bun $(bun --version) / Node $(node --version)"
+msg_ok "Laufzeit bereit: Bun $(bun --version) / Node $(node --version)"
 
-msg_info "Lege Postgres-DB an (crm/crm)"
+step "Postgres-Datenbank anlegen (crm/crm)"
 sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='crm'" | grep -q 1 \
   || sudo -u postgres psql -c "CREATE USER crm WITH PASSWORD 'crm' CREATEDB;"
 sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='crm'" | grep -q 1 \
   || sudo -u postgres createdb -O crm crm
 msg_ok "DB bereit"
 
-msg_info "Klone/updatete ${APP} (${APP_BRANCH})"
+step "CRM-Code holen (${APP_BRANCH})"
 if [[ -d "${APP_DIR}/.git" ]]; then
   git -C "$APP_DIR" fetch --depth 1 origin "$APP_BRANCH"
   git -C "$APP_DIR" reset --hard "origin/${APP_BRANCH}"
@@ -97,7 +103,7 @@ else
 fi
 msg_ok "Code bereit"
 
-msg_info "Erstelle / ergänze .env (idempotent, manuelle Werte bleiben)"
+step "Konfiguration .env (idempotent, manuelle Werte bleiben)"
 ENV_FILE="${APP_DIR}/.env"
 [[ -f "$ENV_FILE" ]] || cp "${APP_DIR}/.env.example" "$ENV_FILE"
 grep -q '^BETTER_AUTH_SECRET=.*[A-Za-z0-9]' "$ENV_FILE" \
@@ -138,7 +144,7 @@ fi
 set -a; source "$ENV_FILE"; set +a
 msg_ok ".env ok"
 
-msg_info "bun install + db:deploy + build (dauert Minuten)"
+step "CRM bauen – bun install + Migrationen + Build (dauert Minuten)"
 cd "$APP_DIR"
 bun install
 bun run db:deploy
@@ -147,7 +153,7 @@ msg_ok "Build fertig"
 
 write_unit() { cat > "/etc/systemd/system/${1}"; systemctl daemon-reload; systemctl enable "$1" >/dev/null; }
 
-msg_info "Schreibe systemd-Units"
+step "systemd-Dienste + Status-Tool installieren"
 write_unit compai-crm-api.service <<EOF
 [Unit]
 Description=CompAI CRM API (NestJS :${API_PORT})
@@ -198,11 +204,38 @@ WantedBy=multi-user.target
 EOF
 msg_ok "Units geschrieben + enabled"
 
-msg_info "Starte Dienste"
+# ── crm-status: visueller Gesundheitscheck für den User ──────────────
+cat > /usr/local/sbin/crm-status <<'STATUSEOF'
+#!/usr/bin/env bash
+# crm-status – zeigt Dienste, Web-Checks, Login-Config und URLs (vom Installer angelegt)
+YW='\033[33m'; GN='\033[1;32m'; RD='\033[1;31m'; CL='\033[m'
+svc() { if systemctl is-active --quiet "$1" 2>/dev/null; then echo -e "${GN}● aktiv   ${CL}"; else echo -e "${RD}○ gestoppt${CL}"; fi; }
+code() { curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$1" 2>/dev/null || echo "---"; }
+IP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -v '^127\.' | head -n1)
+ENV=/opt/compai-crm/.env
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  CompAI CRM – Status"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo -e "  Web-UI (App) . $(svc compai-crm-app)  [:3000 → HTTP $(code http://localhost:3000/)]"
+echo -e "  API .......... $(svc compai-crm-api)  [:3001 → HTTP $(code http://localhost:3001/)]"
+echo -e "  Agent ........ $(svc compai-crm-agent)  [:2000]"
+ALLOW=$(grep '^ALLOWED_SIGN_IN=' "$ENV" 2>/dev/null | cut -d= -f2- | tr -d '"' || true)
+if [[ "$ALLOW" =~ [A-Za-z0-9@.] ]]; then
+  echo -e "  Login ........ ${GN}OAuth-Login für '${ALLOW}'${CL}"
+else
+  echo -e "  Login ........ ${YW}Keys fehlen – OAuth in /opt/compai-crm/.env nachtragen${CL}"
+fi
+echo -e "  URL .......... ${GN}http://${IP:-<VM-IP>}:3000${CL}"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+STATUSEOF
+chmod +x /usr/local/sbin/crm-status
+msg_ok "Status-Tool bereit (crm-status)"
+
+step "Dienste starten + prüfen (systemctl + HTTP)"
 systemctl restart compai-crm-api compai-crm-app compai-crm-agent
 sleep 5
 
-msg_info "Verifiziere (systemctl + HTTP)"
+msg_info "Verifiziere"
 for s in compai-crm-api compai-crm-app compai-crm-agent; do
   systemctl is-active --quiet "$s" || {
     echo "Service $s NICHT aktiv – volle Logs:" >&2
@@ -217,14 +250,17 @@ curl -fsS "http://localhost:${APP_PORT}/" >/dev/null \
   || { echo "App antwortet nicht auf localhost:${APP_PORT}" >&2; journalctl -u compai-crm-app -n 50 --no-pager >&2; exit 1; }
 msg_ok "Verifikation ok"
 
-VM_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+VM_IP="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -v '^127\.' | head -n1)"
 APP_URL="http://${VM_IP:-<VM-IP>}:${APP_PORT}"
 echo "$APP_URL" > /var/log/compai-crm-install.done
 echo ""
-echo -e "  ${CM} ${GN}CompAI CRM installiert + reboot-sicher (systemd, onboot=1 an der VM setzen).${CL}"
-echo -e "  ${CM} App:   ${YW}http://${VM_IP:-<VM-IP>}:${APP_PORT}${CL}"
-echo -e "  ${CM} API:   ${YW}http://${VM_IP:-<VM-IP>}:${API_PORT}${CL}"
-echo -e "  ${CM} Update:  ${YW}cd ${APP_DIR} && git pull && bun install && bun run db:deploy && bun run build && systemctl restart compai-crm-*${CL}"
-echo -e "  ${CM} Deinstall: ${YW}systemctl disable --now compai-crm-*; rm -rf ${APP_DIR}${CL}"
-echo -e "  ${CM} Logs:  ${YW}journalctl -u compai-crm-api -f / -u compai-crm-app -f / -u compai-crm-agent -f${CL}"
+echo -e "${GN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
+echo -e "${GN}  ✓ CompAI CRM installiert nach $(elapsed) – reboot-sicher (systemd)${CL}"
+echo -e "${GN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
+echo -e "  Web-UI .... ${YW}http://${VM_IP:-<VM-IP>}:${APP_PORT}${CL}"
+echo -e "  API ....... ${YW}http://${VM_IP:-<VM-IP>}:${API_PORT}${CL}"
+echo -e "  Status .... ${YW}crm-status${CL}  (Dienste, Login-Check, URLs)"
+echo -e "  Update .... ${YW}cd ${APP_DIR} && git pull && bun install && bun run db:deploy && bun run build && systemctl restart compai-crm-*${CL}"
+echo -e "  Logs ...... ${YW}journalctl -u compai-crm-app -f${CL}  (api/agent analog)"
+echo -e "${GN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 echo ""

@@ -28,6 +28,11 @@ CM="${GN}✓${CL}"; CR="${RD}✗${CL}"
 set -Eeuo pipefail
 shopt -s expand_aliases
 
+# Fortschritt + Dauer für visuelle Rückmeldung
+STEPS=7; STEP=0; START_TS=$SECONDS
+step() { STEP=$((STEP+1)); echo ""; msg_info "[${STEP}/${STEPS}] ${1}"; }
+elapsed() { local s=$((SECONDS-START_TS)); printf '%02d:%02d Min.' $((s/60)) $((s%60)); }
+
 header_info() {
   clear
   cat <<"EOF"
@@ -122,7 +127,7 @@ if qm status "$VMID" >/dev/null 2>&1; then
 fi
 
 # ── Cloud-Init Snippets auf 'local' sicherstellen ────────────────────
-msg_info "Prüfe Snippets-Support auf Storage '${var_snippet_store}'"
+step "Cloud-Init-Snippets auf '${var_snippet_store}'"
 if ! grep -A5 "^dir: ${var_snippet_store}$" /etc/pve/storage.cfg 2>/dev/null | grep -q snippets; then
   cp -a /etc/pve/storage.cfg "/root/storage.cfg.bak.$(date +%s)"
   CUR=$(awk "/^dir: ${var_snippet_store}\$/{f=1} f&&/content/{print \$2; exit}" /etc/pve/storage.cfg)
@@ -138,6 +143,7 @@ msg_ok "Snippets bereit"
 # (ciuser/cipassword/ipconfig) zusammengeführt; user= würde sie ERSETZEN.
 qesc() { printf '%s' "$1" | sed "s/'/'\\\\''/g"; }
 SNIPPET="compai-crm-${VMID}-vendor.yaml"
+step "Installations-Seed für die VM schreiben"
 {
   echo "#cloud-config  # vendor-data: läuft zusätzlich zur PVE-User-Config"
   echo "manage_etc_hosts: true"
@@ -168,7 +174,7 @@ GIS=""; MIS=""; AIKEY=""
 msg_ok "Cloud-Init-Seed geschrieben"
 
 # ── Image + VM ───────────────────────────────────────────────────────
-msg_info "Prüfe Debian-Cloud-Image"
+step "Debian-Cloud-Image"
 IMG_PATH="/var/lib/vz/template/iso/${DEBIAN_IMG}"
 if [[ ! -f "$IMG_PATH" ]]; then
   mkdir -p "$(dirname "$IMG_PATH")"
@@ -176,7 +182,7 @@ if [[ ! -f "$IMG_PATH" ]]; then
 fi
 msg_ok "Image bereit"
 
-msg_info "Erstelle VM ${VMID} (qm create)"
+step "VM ${VMID} erstellen (qm create)"
 qm create "$VMID" \
   --name compai-crm \
   --memory "$var_ram" \
@@ -211,7 +217,7 @@ qm set "$VMID" --cicustom "vendor=${var_snippet_store}:snippets/${SNIPPET}" >/de
 qm set "$VMID" --boot order=scsi0 --serial0 socket --vga serial0 >/dev/null
 msg_ok "VM erstellt (Cloud-Init aktiv)"
 
-msg_info "Starte VM"
+step "VM starten"
 qm start "$VMID" >/dev/null
 msg_ok "VM gestartet – Erstinstallation läuft jetzt selbstständig (ca. 10–25 Min)"
 
@@ -236,7 +242,7 @@ get_vm_ip() {
   return 1
 }
 
-msg_info "Warte auf VM-IP via Agent oder ARP (max. 10 Min)"
+step "VM-IP finden (Agent → ARP → DHCP-Heilung → Auto-Static, max. 10 Min)"
 VM_IP=""
 for i in $(seq 1 60); do
   if VM_IP=$(get_vm_ip 2>/dev/null); then break; fi
@@ -312,7 +318,7 @@ if [[ -z "$VM_IP" ]]; then
 fi
 msg_ok "VM-IP: ${VM_IP}"
 
-msg_info "Warte auf Web-UI http://${VM_IP}:3000 (max. ${var_wait_min} Min)"
+step "Auf Web-UI warten http://${VM_IP}:3000 (Erstbuild, max. ${var_wait_min} Min)"
 END=$(( $(date +%s) + var_wait_min * 60 ))
 N=0
 while [[ $(date +%s) -lt $END ]]; do
@@ -328,25 +334,29 @@ while [[ $(date +%s) -lt $END ]]; do
   CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://${VM_IP}:3000/" 2>/dev/null || echo "000")
   if [[ "$CODE" =~ ^(200|301|302|303|307|308)$ ]]; then
     echo ""
-    echo -e "  ${CM} ${GN}FERTIG – Web-UI ist erreichbar!${CL}"
-    echo -e "  ${CM} CRM:  ${YW}http://${VM_IP}:3000${CL}"
-    echo -e "  ${CM} API:  ${YW}http://${VM_IP}:3001${CL}"
+    echo -e "${GN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
+    echo -e "${GN}  ✓ FERTIG nach $(elapsed) – CompAI CRM ist erreichbar!${CL}"
+    echo -e "${GN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
+    echo -e "  Web-UI .... ${YW}http://${VM_IP}:3000${CL}"
+    echo -e "  API ....... ${YW}http://${VM_IP}:3001${CL}"
     if [[ -n "${GENPASS:-}" ]]; then
-      echo -e "  ${CM} SSH:  ${YW}ssh ${CIUSER}@${VM_IP}${CL}  (Zufallspasswort, auch in ${YW}/root/compai-crm-${VMID}.cred${CL})"
+      echo -e "  SSH ....... ${YW}ssh ${CIUSER}@${VM_IP}${CL}  (Passwort: ${YW}/root/compai-crm-${VMID}.cred${CL} auf dem Host)"
     else
-      echo -e "  ${CM} SSH (falls nötig): ${YW}ssh ${CIUSER}@${VM_IP}${CL}"
+      echo -e "  SSH ....... ${YW}ssh ${CIUSER}@${VM_IP}${CL}"
     fi
+    echo -e "  Status .... ${YW}crm-status${CL}  (in der VM: Dienste, Login-Check, URLs)"
+    echo -e "  VM-ID ..... ${YW}${VMID}${CL}  (onboot=1, reboot-sicher)"
     if [[ -z "${ALLOW:-}" || ( -z "${GID:-}" && -z "${MID:-}" ) ]]; then
-      echo ""
-      echo -e "  ${YW}Noch kein Login möglich (Keys leer) – einmalig nachtragen:${CL}"
+      echo -e "  Login ..... ${RD}noch nicht möglich (Keys leer)${CL} – einmalig nachtragen:"
       echo -e "    ${YW}1.${CL} Google/Microsoft-OAuth-Client anlegen (Upstream-README, 2 Min)"
       echo -e "       Redirect-URI: ${YW}http://${VM_IP}:3001/api/auth/callback/google${CL}"
       echo -e "    ${YW}2.${CL} qm terminal ${VMID}  (oder ssh ${CIUSER}@${VM_IP})"
       echo -e "    ${YW}3.${CL} sudo nano /opt/compai-crm/.env   # ALLOWED_SIGN_IN + CLIENT_ID/SECRET setzen"
       echo -e "    ${YW}4.${CL} sudo systemctl restart compai-crm-api compai-crm-app"
     else
-      echo -e "  ${CM} Login: ${YW}OAuth-Button – nur '${ALLOW}' kommt rein${CL}"
+      echo -e "  Login ..... ${GN}OAuth-Button – nur '${ALLOW}' kommt rein${CL}"
     fi
+    echo -e "${GN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
     echo ""
     exit 0
   fi
@@ -355,7 +365,7 @@ while [[ $(date +%s) -lt $END ]]; do
 done
 
 echo ""
-msg_error "Timeout nach ${var_wait_min} Min – Installation läuft in der VM ggf. weiter."
+msg_error "Timeout nach ${var_wait_min} Min ($(elapsed) vergangen) – Installation läuft in der VM ggf. weiter."
 echo -e "  ${YW}Status prüfen:${CL} qm terminal ${VMID}  →  tail -f /var/log/compai-crm-install.log"
 echo -e "  ${YW}Fertig-Datei:${CL}     cat /var/log/compai-crm-install.done"
 echo -e "  ${YW}Fallback manuell:${CL} bash -c \"\$(wget -qLO - ${GUEST_SCRIPT_URL})\""
