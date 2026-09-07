@@ -164,7 +164,7 @@ Type=simple
 WorkingDirectory=${APP_DIR}/apps/api
 EnvironmentFile=${APP_DIR}/.env
 Environment=PORT=${API_PORT}
-ExecStart=/usr/local/bin/bun dist/main.js
+ExecStart=/usr/local/bin/bun run start:prod
 Restart=always
 RestartSec=10
 [Install]
@@ -180,7 +180,7 @@ Type=simple
 WorkingDirectory=${APP_DIR}/apps/app
 EnvironmentFile=${APP_DIR}/.env
 Environment=PORT=${APP_PORT}
-ExecStart=/usr/local/bin/bun start -p ${APP_PORT}
+ExecStart=/usr/local/bin/bun run start
 Restart=always
 RestartSec=10
 [Install]
@@ -196,7 +196,7 @@ Type=simple
 WorkingDirectory=${APP_DIR}/apps/agent
 EnvironmentFile=${APP_DIR}/.env
 Environment=AGENT_PORT=${AGENT_PORT}
-ExecStart=/usr/local/bin/bun src/index.ts
+ExecStart=/usr/local/bin/bun run start
 Restart=always
 RestartSec=10
 [Install]
@@ -236,13 +236,17 @@ systemctl restart compai-crm-api compai-crm-app compai-crm-agent
 sleep 5
 
 msg_info "Verifiziere"
-for s in compai-crm-api compai-crm-app compai-crm-agent; do
+for s in compai-crm-api compai-crm-app; do
   systemctl is-active --quiet "$s" || {
     echo "Service $s NICHT aktiv – volle Logs:" >&2
     journalctl -u "$s" -n 50 --no-pager >&2
     exit 1
   }
 done
+# Agent ist Hintergrund (braucht ggf. erst einen Modell-Key): Warnung statt Abbruch.
+if ! systemctl is-active --quiet compai-crm-agent; then
+  echo -e "${YW}WARNUNG: compai-crm-agent läuft nicht (startet ggf. erst mit AI_GATEWAY_API_KEY). App+API sind OK – Details: journalctl -u compai-crm-agent -n 50${CL}" >&2
+fi
 curl -fsS "http://localhost:${API_PORT}/api/health" >/dev/null 2>&1 \
   || curl -fsS "http://localhost:${API_PORT}/" >/dev/null \
   || { echo "API antwortet nicht auf localhost:${API_PORT} (Exit $?)" >&2; journalctl -u compai-crm-api -n 50 --no-pager >&2; exit 1; }

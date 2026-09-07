@@ -242,6 +242,23 @@ get_vm_ip() {
   return 1
 }
 
+# Führt einen Befehl per Guest-Agent synchron aus, gibt stdout zurück (base64-decodiert).
+guest_run() {
+  local pid st out i
+  pid=$(qm guest exec "$VMID" -- "$@" 2>/dev/null | grep -oE '[0-9]+' | head -n1 || true)
+  [[ -n "$pid" ]] || return 1
+  for i in $(seq 1 30); do
+    sleep 2
+    st=$(qm guest exec-status "$VMID" "$pid" 2>/dev/null || true)
+    if echo "$st" | grep -q '"exited"[[:space:]]*:[[:space:]]*true'; then
+      out=$(echo "$st" | grep -oE '"out-data"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4 || true)
+      if [[ -n "$out" ]]; then printf '%s' "$out" | base64 -d 2>/dev/null || true; fi
+      return 0
+    fi
+  done
+  return 1
+}
+
 step "VM-IP finden (Agent → ARP → DHCP-Heilung → Auto-Static, max. 10 Min)"
 VM_IP=""
 for i in $(seq 1 60); do
@@ -365,8 +382,16 @@ while [[ $(date +%s) -lt $END ]]; do
 done
 
 echo ""
-msg_error "Timeout nach ${var_wait_min} Min ($(elapsed) vergangen) – Installation läuft in der VM ggf. weiter."
-echo -e "  ${YW}Status prüfen:${CL} qm terminal ${VMID}  →  tail -f /var/log/compai-crm-install.log"
-echo -e "  ${YW}Fertig-Datei:${CL}     cat /var/log/compai-crm-install.done"
-echo -e "  ${YW}Fallback manuell:${CL} bash -c \"\$(wget -qLO - ${GUEST_SCRIPT_URL})\""
+msg_error "Timeout nach ${var_wait_min} Min ($(elapsed) vergangen) – hole Diagnose aus der VM..."
+DONE_URL=$(guest_run cat /var/log/compai-crm-install.done 2>/dev/null || true)
+if [[ -n "$DONE_URL" ]]; then
+  echo -e "  ${CM} ${GN}Installation war FERTIG: ${DONE_URL} – bitte im Browser prüfen!${CL}"
+else
+  echo -e "  ${YW}--- Dienste in der VM ---${CL}"
+  guest_run systemctl is-active compai-crm-app compai-crm-api compai-crm-agent 2>/dev/null || echo "  (Agent-Abfrage fehlgeschlagen)"
+  echo -e "  ${YW}--- Log-Ende (/var/log/compai-crm-install.log) ---${CL}"
+  guest_run tail -n 25 /var/log/compai-crm-install.log 2>/dev/null || echo "  (kein Log abrufbar – Installer lief evtl. nie: Cloud-Init prüfen)"
+fi
+echo -e "  ${YW}Manuell:${CL}  qm terminal ${VMID}  →  tail -f /var/log/compai-crm-install.log"
+echo -e "  ${YW}Fallback:${CL} bash -c \"\$(wget -qLO - ${GUEST_SCRIPT_URL})\""
 exit 1
