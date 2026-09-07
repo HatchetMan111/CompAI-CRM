@@ -337,7 +337,7 @@ msg_ok "VM-IP: ${VM_IP}"
 
 step "Auf Web-UI warten http://${VM_IP}:3000 (Erstbuild, max. ${var_wait_min} Min)"
 END=$(( $(date +%s) + var_wait_min * 60 ))
-N=0
+N=0; LAST_STEP=""
 while [[ $(date +%s) -lt $END ]]; do
   N=$((N+1))
   # DHCP-IP kann sich ändern -> alle ~2 Min neu auflösen
@@ -346,6 +346,14 @@ while [[ $(date +%s) -lt $END ]]; do
     if [[ -n "$NEW_IP" && "$NEW_IP" != "$VM_IP" ]]; then
       VM_IP="$NEW_IP"
       echo -e "\n  ${YW}neue VM-IP: ${VM_IP}${CL}"
+    fi
+  fi
+  # Live-Fortschritt: letzte Installer-Zeile aus der VM holen (~alle 2,5 Min)
+  if (( N % 10 == 1 )); then
+    GSTEP=$(guest_run grep -aE '\[[0-9]+/[0-9]+\]|✓|FEHLER|WARNUNG' /var/log/compai-crm-install.log 2>/dev/null | tail -n1 || true)
+    if [[ -n "$GSTEP" && "$GSTEP" != "$LAST_STEP" ]]; then
+      LAST_STEP="$GSTEP"
+      echo -e "\n  ${BL}VM meldet: ${GSTEP}${CL}"
     fi
   fi
   CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://${VM_IP}:3000/" 2>/dev/null || echo "000")
