@@ -66,6 +66,19 @@ trap 'error_handler $LINENO' ERR
 
 die() { msg_error "$1"; exit 1; }
 
+# Prüft ALLOWED_SIGN_IN: eine E-Mail, eine Domain oder Komma-Mix aus beidem.
+valid_allow() {
+  local v="${1//[[:space:]]/}" part
+  [[ -n "$v" ]] || return 1
+  IFS=',' read -ra parts <<< "$v"
+  for part in "${parts[@]}"; do
+    if [[ "$part" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; then continue; fi
+    if [[ "$part" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}$ ]]; then continue; fi
+    return 1
+  done
+  return 0
+}
+
 command -v qm >/dev/null 2>&1 || die "Dieses Script muss auf einem Proxmox VE Host laufen (qm fehlt)."
 command -v pvesm >/dev/null 2>&1 || die "pvesm fehlt – kein vollständiger PVE-Host?"
 
@@ -101,11 +114,17 @@ if [[ "${STATIC_NOW:-}" =~ ^[Jj]$ ]]; then
 fi
 
 echo -e "\n${YW}Login: Nur die E-Mail/Domain ist PFLICHT (die API startet ohne gar nicht).${CL}"
-echo -e "  Alles andere ist optional – OAuth-Keys lassen sich später nachtragen."
+echo -e "  Beispiele: ${GN}du@gmail.com${CL}  oder  ${GN}firma.de${CL}  (ganze Domain = alle Adressen dort)"
+echo -e "  Abbruch jederzeit mit ${YW}Strg+C${CL}."
 ALLOW=""
-while [[ -z "${ALLOW:-}" ]]; do
-  read -rp "ALLOWED_SIGN_IN – deine Login-E-Mail/Domain: " ALLOW
+while true; do
+  read -rp "ALLOWED_SIGN_IN: " ALLOW
+  ALLOW="${ALLOW//[[:space:]]/}"
+  if valid_allow "$ALLOW"; then break; fi
+  echo -e "  ${RD}'${ALLOW:-<leer>}' ist keine gültige E-Mail oder Domain – bitte erneut eingeben.${CL}"
+  ALLOW=""
 done
+echo -e "  ${CM} ${GN}Übernommen: ${ALLOW}${CL}"
 GID=""; GIS=""; MID=""; MIS=""; AIKEY=""
 read -rp "OAuth/Modell-Keys jetzt eintragen? [j/N]: " OAUTH_NOW
 if [[ "${OAUTH_NOW:-}" =~ ^[Jj]$ ]]; then

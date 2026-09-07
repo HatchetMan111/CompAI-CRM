@@ -144,15 +144,33 @@ ensure_env() {
     fi
   fi
 }
+# Prüft ALLOWED_SIGN_IN: eine E-Mail, eine Domain oder Komma-Mix aus beidem.
+valid_allow() {
+  local v="${1//[[:space:]]/}" part
+  [[ -n "$v" ]] || return 1
+  IFS=',' read -ra parts <<< "$v"
+  for part in "${parts[@]}"; do
+    if [[ "$part" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; then continue; fi
+    if [[ "$part" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}$ ]]; then continue; fi
+    return 1
+  done
+  return 0
+}
 ALLOW="${CRM_ALLOWED_SIGN_IN:-}"
 if [[ -z "$ALLOW" ]]; then
   if [[ "$NONINTERACTIVE" == "0" ]] && [[ -t 0 ]]; then
     echo ""
     echo -e "${YW}PFLICHT: Die API startet ohne ALLOWED_SIGN_IN gar nicht (Upstream-Validierung).${CL}"
     echo -e "${YW}Google Redirect-URI = http://<VM-IP>:3001/api/auth/callback/google${CL}"
-    while [[ -z "$ALLOW" ]]; do
+    echo -e "  Beispiele: ${GN}du@gmail.com${CL}  oder  ${GN}acme.com${CL} – Abbruch mit ${YW}Strg+C${CL}."
+    while true; do
       read -rp "ALLOWED_SIGN_IN (z.B. acme.com oder du@gmail.com): " ALLOW
+      ALLOW="${ALLOW//[[:space:]]/}"
+      if valid_allow "$ALLOW"; then break; fi
+      echo -e "  ${RD}'${ALLOW:-<leer>}' ist keine gültige E-Mail oder Domain – bitte erneut.${CL}"
+      ALLOW=""
     done
+    echo -e "  ${CM} ${GN}Übernommen: ${ALLOW}${CL}"
   else
     echo -e "${RD}ABBRUCH vor dem Build: ALLOWED_SIGN_IN ist leer, aber die API startet ohne nicht.${CL}" >&2
     echo -e "${YW}Lösung: nano ${APP_DIR}/.env  (ALLOWED_SIGN_IN setzen) und Installer erneut laufen lassen.${CL}" >&2
