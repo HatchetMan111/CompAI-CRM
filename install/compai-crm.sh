@@ -92,6 +92,10 @@ sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='crm'" | grep -q
 sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='crm'" | grep -q 1 \
   || sudo -u postgres createdb -O crm crm
 msg_ok "DB bereit"
+# Verbindung so testen, wie Prisma sie nutzt (TCP + crm-User) – nicht erst beim migrate scheitern.
+PGPASSWORD=crm psql -h localhost -U crm -d crm -tc 'SELECT 1' 2>&1 | grep -q 1 \
+  || { echo "DB-Login als crm via TCP schlägt fehl – prüfe pg_hba / Rolle (P1000-Verdacht)." >&2; exit 1; }
+msg_ok "DB-Login ok"
 
 step "CRM-Code holen (${APP_BRANCH})"
 if [[ -d "${APP_DIR}/.git" ]]; then
@@ -110,6 +114,13 @@ grep -q '^BETTER_AUTH_SECRET=.*[A-Za-z0-9]' "$ENV_FILE" \
   || sed -i "s|^BETTER_AUTH_SECRET=.*|BETTER_AUTH_SECRET=\"$(openssl rand -base64 32)\"|" "$ENV_FILE"
 grep -q '^DATABASE_URL=' "$ENV_FILE" \
   || echo 'DATABASE_URL="postgresql://crm:crm@localhost:5432/crm?schema=public"' >> "$ENV_FILE"
+# .env.example zeigt auf postgres:postgres – dieser User hat per Passwort keinen
+# Zugriff (P1000). Immer auf den vom Installer angelegten crm-User umschreiben,
+# außer es steht bereits eine bewusst andere (nicht-Beispiel-) URL drin.
+if grep -q '^DATABASE_URL=.*postgres:postgres@localhost' "$ENV_FILE"; then
+  sed -i 's|^DATABASE_URL=.*|DATABASE_URL="postgresql://crm:crm@localhost:5432/crm?schema=public"|' "$ENV_FILE"
+  echo -e "${YW}hinweis: DATABASE_URL auf Installer-DB-User crm umgestellt${CL}"
+fi
 # Setzt KEY="val" nur wenn der aktuelle Wert leer ist (Re-Runs ändern nichts).
 ensure_env() {
   local key=$1 val=$2 cur esc

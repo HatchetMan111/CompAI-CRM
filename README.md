@@ -121,6 +121,7 @@ cd /opt/compai-crm && git pull && bun install && bun run db:deploy && bun run bu
 
 | Symptom | Lösung |
 |---|---|
+| `P1000: Authentication failed` bei `db:deploy` | Alter Installer-Stand: Guest-Installer erneut laufen lassen (stellt `DATABASE_URL` automatisch auf den `crm`-User um). |
 | Keine IPv4 / nur IPv6 in der VM | Script stößt `dhclient` selbst an, sonst Auto-Static-IP (`.230`–`.250`). Notfalls neu starten + **statische IP** wählen. |
 | `No DHCPOFFERS received` | DHCP-Server antwortet der VM nicht → statische IP nehmen (z. B. `192.168.178.250/24`, GW `.1`). |
 | Nur Login-Seite, kein Button funktioniert | OAuth-Keys fehlen → [nachtragen](#wichtig-vorab-oauth-pflicht-kommt-von-der-app). Es gibt kein Passwort-Login. |
