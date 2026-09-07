@@ -42,10 +42,19 @@ error_handler() {
     systemctl --no-pager status "$s" 2>&1 | head -n 20 >&2 || true
     journalctl -u "$s" -n 20 --no-pager 2>&1 >&2 || true
   done
-  echo -e "${YW}Re-Run mit: DEBUG=1 bash -x $0${CL}" >&2
+  echo -e "${YW}Re-Run mit: DEBUG=1 bash -x ${RERUN_HINT}${CL}" >&2
   exit "$ec"
 }
 trap 'error_handler $LINENO' ERR
+RERUN_HINT="$0"; [[ -f /usr/local/sbin/compai-crm.sh ]] && RERUN_HINT="/usr/local/sbin/compai-crm.sh" || true
+
+# Darf NIE auf dem Proxmox-Host laufen (Hypervisor sauber halten) – nur in der VM.
+if [[ -d /etc/pve ]] && command -v qm >/dev/null 2>&1 && [[ "${CRM_ALLOW_PVE:-0}" != "1" ]]; then
+  echo -e "${CR} ABBRUCH: Das läuft auf dem Proxmox-HOST (qm + /etc/pve gefunden).${CL}" >&2
+  echo -e "${YW}Bitte IN DER VM ausführen: qm terminal <VM-ID> → sudo -i → Einzeiler aus dem README.${CL}" >&2
+  echo -e "${YW}Notfall-Override (nicht empfohlen): CRM_ALLOW_PVE=1 voranstellen.${CL}" >&2
+  exit 1
+fi
 
 # ── Cloud-Init-Seed (vom Host-Script) + Noninteractive-Modus ─────────
 SEED_FILE="/root/crm-seed/install.env"
@@ -136,11 +145,19 @@ ensure_env() {
   fi
 }
 ALLOW="${CRM_ALLOWED_SIGN_IN:-}"
-if [[ -z "$ALLOW" && "$NONINTERACTIVE" == "0" && -t 0 ]]; then
-  echo ""
-  echo -e "${YW}PFLICHT: Ohne ALLOWED_SIGN_IN + Google/Microsoft-OAuth gibt es KEINEN Login.${CL}"
-  echo -e "${YW}README: Google Redirect-URI = http://<VM-IP>:3001/api/auth/callback/google${CL}"
-  read -rp "ALLOWED_SIGN_IN (z.B. acme.com oder du@gmail.com, leer=später manuell): " ALLOW
+if [[ -z "$ALLOW" ]]; then
+  if [[ "$NONINTERACTIVE" == "0" ]] && [[ -t 0 ]]; then
+    echo ""
+    echo -e "${YW}PFLICHT: Die API startet ohne ALLOWED_SIGN_IN gar nicht (Upstream-Validierung).${CL}"
+    echo -e "${YW}Google Redirect-URI = http://<VM-IP>:3001/api/auth/callback/google${CL}"
+    while [[ -z "$ALLOW" ]]; do
+      read -rp "ALLOWED_SIGN_IN (z.B. acme.com oder du@gmail.com): " ALLOW
+    done
+  else
+    echo -e "${RD}ABBRUCH vor dem Build: ALLOWED_SIGN_IN ist leer, aber die API startet ohne nicht.${CL}" >&2
+    echo -e "${YW}Lösung: nano ${APP_DIR}/.env  (ALLOWED_SIGN_IN setzen) und Installer erneut laufen lassen.${CL}" >&2
+    exit 1
+  fi
 fi
 ensure_env "ALLOWED_SIGN_IN" "${ALLOW:-}"
 ensure_env "GOOGLE_CLIENT_ID" "${CRM_GOOGLE_CLIENT_ID:-}"

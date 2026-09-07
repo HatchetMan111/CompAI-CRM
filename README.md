@@ -30,9 +30,9 @@ die Web-UI von selbst. Kein Terminal in der VM mehr nötig.**
 bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/CompAI-CRM/main/install/compai-crm-vm.sh)"
 ```
 
-Das Script fragt **einmalig** (alles mit Default, alles überspringbar per Enter):
-VM-ID, Linux-User + Passwort (leer = Zufallspasswort), Netzwerk (DHCP oder
-statisch), `ALLOWED_SIGN_IN`, optional OAuth-Clients und `AI_GATEWAY_API_KEY`.
+Das Script fragt **einmalig**: VM-ID, Linux-User + Passwort (leer = Zufallspasswort),
+Netzwerk (DHCP oder statisch), **Pflicht: `ALLOWED_SIGN_IN`** (deine Mail/Domain –
+die API startet ohne gar nicht), optional OAuth-Clients und `AI_GATEWAY_API_KEY`.
 Danach läuft alles von selbst, mit Schrittzähler `[1/7]…[7/7]` und Zeitanzeige:
 
 1. Cloud-Init-Seed (User, Netzwerk, Keys) wird in die VM gelegt
@@ -122,6 +122,8 @@ cd /opt/compai-crm && git pull && bun install && bun run db:deploy && bun run bu
 | Symptom | Lösung |
 |---|---|
 | `P1000: Authentication failed` bei `db:deploy` | Alter Installer-Stand: Guest-Installer erneut laufen lassen (stellt `DATABASE_URL` automatisch auf den `crm`-User um). |
+| `ALLOWED_SIGN_IN is required`, API crash-loopt | E-Mail/Domain in `/opt/compai-crm/.env` setzen + `systemctl restart compai-crm-api compai-crm-app`. Host-Script fragt sie seitdem als Pflicht ab. |
+| Aus Versehen auf dem **Host** installiert (`root@Prox`)? | Sofort aufräumen (Hypervisor!): `systemctl disable --now compai-crm-api compai-crm-app compai-crm-agent; rm -f /etc/systemd/system/compai-crm-*.service /usr/local/sbin/crm-status /usr/local/sbin/compai-crm.sh /var/log/compai-crm-install.*; systemctl daemon-reload; rm -rf /opt/compai-crm; sudo -u postgres psql -c "DROP DATABASE IF EXISTS crm;" -c "DROP ROLE IF EXISTS crm;"` – danach nur noch **in der VM** installieren (der Installer verweigert den Host seitdem von selbst). |
 | Keine IPv4 / nur IPv6 in der VM | Script stößt `dhclient` selbst an, sonst Auto-Static-IP (`.230`–`.250`). Notfalls neu starten + **statische IP** wählen. |
 | `No DHCPOFFERS received` | DHCP-Server antwortet der VM nicht → statische IP nehmen (z. B. `192.168.178.250/24`, GW `.1`). |
 | Nur Login-Seite, kein Button funktioniert | OAuth-Keys fehlen → [nachtragen](#wichtig-vorab-oauth-pflicht-kommt-von-der-app). Es gibt kein Passwort-Login. |

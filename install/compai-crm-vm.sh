@@ -100,9 +100,12 @@ if [[ "${STATIC_NOW:-}" =~ ^[Jj]$ ]]; then
   [[ -n "$IP_GW" ]] || die "Gateway fehlt."
 fi
 
-echo -e "\n${YW}Login & Keys: ALLES OPTIONAL – nur Enter drücken, das Script läuft trotzdem durch.${CL}"
-echo -e "  Ohne Keys zeigt die Web-UI nur die Login-Seite, bis du sie nachträgst (Anleitung kommt am Ende)."
-read -rp "ALLOWED_SIGN_IN – deine Login-E-Mail/Domain (leer = später): " ALLOW
+echo -e "\n${YW}Login: Nur die E-Mail/Domain ist PFLICHT (die API startet ohne gar nicht).${CL}"
+echo -e "  Alles andere ist optional – OAuth-Keys lassen sich später nachtragen."
+ALLOW=""
+while [[ -z "${ALLOW:-}" ]]; do
+  read -rp "ALLOWED_SIGN_IN – deine Login-E-Mail/Domain: " ALLOW
+done
 GID=""; GIS=""; MID=""; MIS=""; AIKEY=""
 read -rp "OAuth/Modell-Keys jetzt eintragen? [j/N]: " OAUTH_NOW
 if [[ "${OAUTH_NOW:-}" =~ ^[Jj]$ ]]; then
@@ -371,8 +374,8 @@ while [[ $(date +%s) -lt $END ]]; do
     fi
     echo -e "  Status .... ${YW}crm-status${CL}  (in der VM: Dienste, Login-Check, URLs)"
     echo -e "  VM-ID ..... ${YW}${VMID}${CL}  (onboot=1, reboot-sicher)"
-    if [[ -z "${ALLOW:-}" || ( -z "${GID:-}" && -z "${MID:-}" ) ]]; then
-      echo -e "  Login ..... ${RD}noch nicht möglich (Keys leer)${CL} – einmalig nachtragen:"
+    if [[ -z "${GID:-}" && -z "${MID:-}" ]]; then
+      echo -e "  Login ..... ${YW}OAuth-Keys fehlen noch${CL} – einmalig nachtragen:"
       echo -e "    ${YW}1.${CL} Google/Microsoft-OAuth-Client anlegen (Upstream-README, 2 Min)"
       echo -e "       Redirect-URI: ${YW}http://${VM_IP}:3001/api/auth/callback/google${CL}"
       echo -e "    ${YW}2.${CL} qm terminal ${VMID}  (oder ssh ${CIUSER}@${VM_IP})"
