@@ -6,7 +6,7 @@
 #   CRM_NONINTERACTIVE=1 + Werte aus /root/crm-seed/install.env
 #   (CRM_ALLOWED_SIGN_IN, CRM_GOOGLE_CLIENT_ID/SECRET,
 #    CRM_MICROSOFT_CLIENT_ID/SECRET, CRM_AI_GATEWAY_API_KEY)
-# Installiert: Postgres 15 + Bun 1.3.12 + Node 22 + trycompai/crm (Branch release)
+# Installiert: Postgres 15 + Bun 1.3.12 + Node 24 + trycompai/crm (Branch release)
 # Dienste: compai-crm-api(:3001), compai-crm-app(:3000), compai-crm-agent(:2000)
 # Debug: DEBUG=1 bash -x install/compai-crm.sh  (volles xtrace)
 # Unattended-Log: /var/log/compai-crm-install.log, Fertig: /var/log/compai-crm-install.done
@@ -73,15 +73,15 @@ systemctl enable --now postgresql >/dev/null
 systemctl enable --now qemu-guest-agent >/dev/null 2>&1 || true
 msg_ok "Postgres läuft"
 
-step "Laufzeit Bun ${BUN_VERSION} + Node.js 22"
+step "Laufzeit Bun ${BUN_VERSION} + Node.js 24"
 if ! command -v bun >/dev/null 2>&1; then
   msg_info "Installiere Bun ${BUN_VERSION}"
   curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s -- "bun-v${BUN_VERSION}" >/dev/null
   ln -sf /usr/local/bin/bun /usr/bin/bun
 fi
-if ! command -v node >/dev/null 2>&1 || [[ "$(node -v | cut -d. -f1 | tr -dc 0-9)" -lt 22 ]]; then
-  msg_info "Installiere Node.js 22 (nodesource)"
-  curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null
+if ! command -v node >/dev/null 2>&1 || [[ "$(node -v | cut -d. -f1 | tr -dc 0-9)" -lt 24 ]]; then
+  msg_info "Installiere Node.js 24 (nodesource – eve-CLI braucht >=24)"
+  curl -fsSL https://deb.nodesource.com/setup_24.x | bash - >/dev/null
   apt-get install -y -qq nodejs >/dev/null
 fi
 msg_ok "Laufzeit bereit: Bun $(bun --version) / Node $(node --version)"

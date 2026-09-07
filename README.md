@@ -134,6 +134,6 @@ cd /opt/compai-crm && git pull && bun install && bun run db:deploy && bun run bu
 | Datei | Zweck |
 |---|---|
 | `install/compai-crm-vm.sh` | PVE-Host-Script: fragt alles ab, erstellt VM + Cloud-Init-Seed, findet IP, wartet auf Web-UI, druckt Ergebnis-Box (`set -Eeuo pipefail`, Stacktrace, Secrets maskiert) |
-| `install/compai-crm.sh` | Guest-Installer: Postgres, Bun 1.3.12, Node 22, CRM-Build, systemd-Units, `crm-status`-Tool, HTTP-Verifikation – manuell oder per Cloud-Init (`CRM_NONINTERACTIVE=1`) |
+| `install/compai-crm.sh` | Guest-Installer: Postgres, Bun 1.3.12, Node 24 (eve-CLI braucht ≥24), CRM-Build, systemd-Units, `crm-status`-Tool, HTTP-Verifikation – manuell oder per Cloud-Init (`CRM_NONINTERACTIVE=1`) |
 
 Upstream: https://github.com/trycompai/crm (Branch `release`, MIT).
