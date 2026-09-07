@@ -279,25 +279,40 @@ msg_ok "Status-Tool bereit (crm-status)"
 
 step "Dienste starten + prüfen (systemctl + HTTP)"
 systemctl restart compai-crm-api compai-crm-app compai-crm-agent
-sleep 5
+sleep 10
+
+# HTTP mit Geduld prüfen – Erststart (Next/Nest) braucht gerne 1–3 Minuten.
+wait_http() {
+  local url=$1 tries=${2:-30} wait_s=${3:-10} i
+  for ((i=1; i<=tries; i++)); do
+    if curl -fsS --max-time 5 "$url" >/dev/null 2>&1; then return 0; fi
+    sleep "$wait_s"
+  done
+  return 1
+}
 
 msg_info "Verifiziere"
 for s in compai-crm-api compai-crm-app; do
-  systemctl is-active --quiet "$s" || {
+  ok=""
+  for _ in $(seq 1 6); do
+    if systemctl is-active --quiet "$s"; then ok=1; break; fi
+    sleep 5
+  done
+  if [[ -z "$ok" ]]; then
     echo "Service $s NICHT aktiv – volle Logs:" >&2
     journalctl -u "$s" -n 50 --no-pager >&2
     exit 1
-  }
+  fi
 done
 # Agent ist Hintergrund (braucht ggf. erst einen Modell-Key): Warnung statt Abbruch.
 if ! systemctl is-active --quiet compai-crm-agent; then
   echo -e "${YW}WARNUNG: compai-crm-agent läuft nicht (startet ggf. erst mit AI_GATEWAY_API_KEY). App+API sind OK – Details: journalctl -u compai-crm-agent -n 50${CL}" >&2
 fi
-curl -fsS "http://localhost:${API_PORT}/api/health" >/dev/null 2>&1 \
-  || curl -fsS "http://localhost:${API_PORT}/" >/dev/null \
-  || { echo "API antwortet nicht auf localhost:${API_PORT} (Exit $?)" >&2; journalctl -u compai-crm-api -n 50 --no-pager >&2; exit 1; }
-curl -fsS "http://localhost:${APP_PORT}/" >/dev/null \
-  || { echo "App antwortet nicht auf localhost:${APP_PORT}" >&2; journalctl -u compai-crm-app -n 50 --no-pager >&2; exit 1; }
+wait_http "http://localhost:${API_PORT}/api/health" 6 10 \
+  || wait_http "http://localhost:${API_PORT}/" 18 10 \
+  || { echo "API antwortet nicht auf localhost:${API_PORT} (3 Min gewartet)" >&2; journalctl -u compai-crm-api -n 50 --no-pager >&2; exit 1; }
+wait_http "http://localhost:${APP_PORT}/" 30 10 \
+  || { echo "App antwortet nicht auf localhost:${APP_PORT} (5 Min gewartet)" >&2; journalctl -u compai-crm-app -n 50 --no-pager >&2; exit 1; }
 msg_ok "Verifikation ok"
 
 VM_IP="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -v '^127\.' | head -n1)"

@@ -153,6 +153,7 @@ step "Cloud-Init-Snippets auf '${var_snippet_store}'"
 if ! grep -A5 "^dir: ${var_snippet_store}$" /etc/pve/storage.cfg 2>/dev/null | grep -q snippets; then
   cp -a /etc/pve/storage.cfg "/root/storage.cfg.bak.$(date +%s)"
   CUR=$(awk "/^dir: ${var_snippet_store}\$/{f=1} f&&/content/{print \$2; exit}" /etc/pve/storage.cfg)
+  [[ -n "$CUR" ]] || die "Storage-Abschnitt 'dir: ${var_snippet_store}' in /etc/pve/storage.cfg nicht gefunden – Snippets manuell aktivieren: pvesm set ${var_snippet_store} --content <bisher>,snippets"
   pvesm set "$var_snippet_store" --content "${CUR},snippets" >/dev/null \
     || die "Snippets lassen sich nicht aktivieren – manuell: pvesm set ${var_snippet_store} --content <alt>,snippets"
 fi
